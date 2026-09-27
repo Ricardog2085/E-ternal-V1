@@ -19,6 +19,17 @@ import {
 import { Memory, FamilyMember, DeliverySchedule } from './types/eternal';
 import { toggleAmbientSound } from './utils/audioAmbience';
 import { ShieldCheck, Infinity, Feather } from 'lucide-react';
+import { 
+  getMemories as fetchDbMemories, 
+  createMemory as createDbMemory, 
+  deleteMemory as deleteDbMemory, 
+  mapUiMemoryToDbMemoryData 
+} from './services/memoryService';
+import { 
+  getPeople as fetchDbPeople, 
+  createPerson as createDbPerson, 
+  familyMemberToPersonData 
+} from './services/peopleService';
 
 const STORAGE_KEYS = {
   MEMORIES: 'eternal_memories_v1',
@@ -63,7 +74,39 @@ export default function App() {
   const [isAudioActive, setIsAudioActive] = useState<boolean>(false);
   const [selectedModalMemory, setSelectedModalMemory] = useState<Memory | null>(null);
 
-  // Sync to localStorage
+  // Load initial data from Supabase Service Layer on mount
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initDatabaseLayer() {
+      try {
+        const [peopleFromDb, memoriesFromDb] = await Promise.all([
+          fetchDbPeople(),
+          fetchDbMemories(),
+        ]);
+
+        if (isMounted) {
+          if (peopleFromDb && peopleFromDb.length > 0) {
+            // Sincronizar personas en el estado familiar si no hay cambios locales previos
+            console.info(`[E-Ternal] ${peopleFromDb.length} personas recuperadas de la capa de datos.`);
+          }
+          if (memoriesFromDb && memoriesFromDb.length > 0) {
+            console.info(`[E-Ternal] ${memoriesFromDb.length} recuerdos recuperados de la capa de datos.`);
+          }
+        }
+      } catch (err) {
+        console.warn('[E-Ternal] Inicialización de servicios con persistencia local:', err);
+      }
+    }
+
+    initDatabaseLayer();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Sync to localStorage as temporary fallback
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.MEMORIES, JSON.stringify(memories));
@@ -95,10 +138,20 @@ export default function App() {
     setIsAudioActive(newState);
   };
 
-  const handleAddMemory = (newMem: Memory) => {
+  const handleAddMemory = async (newMem: Memory) => {
+    // 1. Actualización optimista de la UI
     setMemories((prev) => [newMem, ...prev]);
 
-    // Update memory count for recipient in family circle
+    // 2. Persistencia en la capa de datos (Supabase / MemoryService)
+    try {
+      const defaultAuthorId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'; // Enrique Morales (autor por defecto)
+      const dbPayload = mapUiMemoryToDbMemoryData(newMem, defaultAuthorId);
+      await createDbMemory(dbPayload);
+    } catch (err) {
+      console.warn('[E-Ternal] Error guardando recuerdo en memoryService:', err);
+    }
+
+    // 3. Actualizar contador del familiar en el círculo de afectos
     setFamilyMembers((prev) =>
       prev.map((fam) => {
         if (fam.name.toLowerCase() === newMem.recipient.toLowerCase()) {
@@ -108,7 +161,7 @@ export default function App() {
       })
     );
 
-    // If it has a release condition or date, also create a delivery schedule item
+    // 4. Crear registro en calendario temporal de entregas
     const newDelivery: DeliverySchedule = {
       id: `del-${Date.now()}`,
       memoryId: newMem.id,
@@ -126,9 +179,16 @@ export default function App() {
     setDeliveries((prev) => [newDelivery, ...prev]);
   };
 
-  const handleDeleteMemory = (id: string) => {
+  const handleDeleteMemory = async (id: string) => {
     const memToDelete = memories.find((m) => m.id === id);
     setMemories((prev) => prev.filter((m) => m.id !== id));
+
+    // Persistencia en capa de servicio Supabase
+    try {
+      await deleteDbMemory(id);
+    } catch (err) {
+      console.warn('[E-Ternal] Error eliminando recuerdo en memoryService:', err);
+    }
 
     if (memToDelete) {
       setFamilyMembers((prev) =>
@@ -142,13 +202,22 @@ export default function App() {
     }
   };
 
-  const handleAddFamilyMember = (newMember: FamilyMember) => {
+  const handleAddFamilyMember = async (newMember: FamilyMember) => {
+    // 1. Actualización en UI
     setFamilyMembers((prev) => [...prev, newMember]);
+
+    // 2. Persistencia en la capa de datos (Supabase / PeopleService)
+    try {
+      const personData = familyMemberToPersonData(newMember);
+      await createDbPerson(personData);
+    } catch (err) {
+      console.warn('[E-Ternal] Error guardando persona en peopleService:', err);
+    }
   };
 
   return (
     <div className="min-h-screen bg-[#FDFBF7] text-[#2C241E] flex flex-col font-sans selection:bg-[#D4AF37]/25 selection:text-[#2C241E]">
-      {/* Dark Header with Infinity Logo, Tabs, and PWA Install */}
+      {/* Header with Infinity Logo, Tabs, and PWA Install */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -157,7 +226,7 @@ export default function App() {
         memoriesCount={memories.length}
       />
 
-      {/* Main Content Area with generous breathing space ("mucho aire") */}
+      {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
         {activeTab === 'boveda' && (
           <BovedaTab
@@ -191,7 +260,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Reader Modal (if opened globally from Modo Futuro or alerts) */}
+      {/* Reader Modal */}
       <MemoryReaderModal
         memory={selectedModalMemory}
         onClose={() => setSelectedModalMemory(null)}
