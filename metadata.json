@@ -1,0 +1,8 @@
+{
+  "name": "E-ternal - Guardián de la Memoria",
+  "description": "Bóveda de legado personal, cápsulas de memoria, custodios familiares y avatar consciente para trascender en el tiempo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
