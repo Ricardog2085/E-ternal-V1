@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Plus, 
   Search, 
@@ -23,7 +23,12 @@ import { NewMemoryModal } from './NewMemoryModal';
 
 interface BovedaTabProps {
   memories: Memory[];
-  onAddMemory: (newMem: Memory) => void;
+  onAddMemory: (
+    newMem: Memory,
+    audioBlob?: Blob,
+    audioMimeType?: string,
+    durationSeconds?: number
+  ) => Promise<void> | void;
   onDeleteMemory: (id: string) => void;
   familyMembers?: FamilyMember[];
 }
@@ -39,13 +44,35 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
   const [activeMemory, setActiveMemory] = useState<Memory | null>(null);
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const toggleAudioPlay = (id: string, e: React.MouseEvent) => {
+  useEffect(() => {
+    return () => {
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current = null;
+      }
+    };
+  }, []);
+
+  const toggleAudioPlay = (mem: Memory, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (playingAudioId === id) {
+    if (playingAudioId === mem.id) {
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+      }
       setPlayingAudioId(null);
     } else {
-      setPlayingAudioId(id);
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+      }
+      if (mem.audioUrl) {
+        const audio = new Audio(mem.audioUrl);
+        audio.onended = () => setPlayingAudioId(null);
+        audio.play().catch((err) => console.warn('Audio play error:', err));
+        currentAudioRef.current = audio;
+      }
+      setPlayingAudioId(mem.id);
     }
   };
 
@@ -203,8 +230,8 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
                 {/* 1. TIPO VOZ CON WAVEFORM */}
                 {mem.memoryType === 'voz' && (
                   <div 
-                    onClick={(e) => toggleAudioPlay(mem.id, e)}
-                    className="p-4 rounded-xl bg-[#FAF7F2] text-[#2C241E] border border-[#D4AF37]/40 shadow-xs space-y-2.5 transition-all group-hover:border-[#D4AF37]/80"
+                    onClick={(e) => toggleAudioPlay(mem, e)}
+                    className="p-4 rounded-xl bg-[#FAF7F2] text-[#2C241E] border border-[#D4AF37]/40 shadow-xs space-y-2.5 transition-all group-hover:border-[#D4AF37]/80 cursor-pointer"
                   >
                     <div className="flex items-center justify-between text-xs">
                       <div className="flex items-center space-x-2 text-[#A88720]">
@@ -217,9 +244,10 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
                     <div className="flex items-center space-x-3">
                       <button
                         type="button"
+                        onClick={(e) => toggleAudioPlay(mem, e)}
                         className="w-8 h-8 rounded-full bg-[#D4AF37] text-white flex items-center justify-center flex-shrink-0 hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-xs"
                       >
-                        {isAudioActive ? (
+                        {playingAudioId === mem.id ? (
                           <Pause className="w-3.5 h-3.5 fill-current" />
                         ) : (
                           <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
@@ -232,9 +260,9 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
                           <div
                             key={idx}
                             className={`flex-1 rounded-full transition-all duration-200 ${
-                              isAudioActive ? 'bg-[#D4AF37]' : 'bg-[#D8C9B4]'
+                              playingAudioId === mem.id ? 'bg-[#D4AF37]' : 'bg-[#D8C9B4]'
                             }`}
-                            style={{ height: `${isAudioActive ? bar : Math.max(18, bar * 0.7)}%` }}
+                            style={{ height: `${playingAudioId === mem.id ? bar : Math.max(18, bar * 0.7)}%` }}
                           />
                         ))}
                       </div>

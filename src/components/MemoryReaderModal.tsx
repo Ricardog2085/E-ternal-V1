@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   Lock, 
@@ -27,8 +27,13 @@ export const MemoryReaderModal: React.FC<MemoryReaderModalProps> = ({ memory, on
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState(0);
   const [copiedLink, setCopiedLink] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     if (memory) {
       setIsSealed(memory.isLocked);
       setIsUnsealing(false);
@@ -39,7 +44,7 @@ export const MemoryReaderModal: React.FC<MemoryReaderModalProps> = ({ memory, on
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (isPlayingAudio) {
+    if (isPlayingAudio && !memory?.audioUrl) {
       interval = setInterval(() => {
         setAudioProgress((prev) => {
           if (prev >= 100) {
@@ -51,7 +56,34 @@ export const MemoryReaderModal: React.FC<MemoryReaderModalProps> = ({ memory, on
       }, 200);
     }
     return () => clearInterval(interval);
-  }, [isPlayingAudio]);
+  }, [isPlayingAudio, memory?.audioUrl]);
+
+  const togglePlayAudio = () => {
+    if (isPlayingAudio) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      setIsPlayingAudio(false);
+    } else {
+      if (memory?.audioUrl) {
+        if (!audioRef.current) {
+          const audio = new Audio(memory.audioUrl);
+          audio.onended = () => {
+            setIsPlayingAudio(false);
+            setAudioProgress(0);
+          };
+          audio.ontimeupdate = () => {
+            if (audio.duration) {
+              setAudioProgress((audio.currentTime / audio.duration) * 100);
+            }
+          };
+          audioRef.current = audio;
+        }
+        audioRef.current.play().catch((err) => console.warn('Audio playback error:', err));
+      }
+      setIsPlayingAudio(true);
+    }
+  };
 
   if (!memory) return null;
 
@@ -214,7 +246,7 @@ export const MemoryReaderModal: React.FC<MemoryReaderModalProps> = ({ memory, on
 
                   <div className="flex items-center space-x-4">
                     <button
-                      onClick={() => setIsPlayingAudio(!isPlayingAudio)}
+                      onClick={togglePlayAudio}
                       className="w-11 h-11 rounded-full bg-[#D4AF37] text-white flex items-center justify-center hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-gold-subtle"
                       title={isPlayingAudio ? 'Pausar audio' : 'Reproducir voz'}
                     >

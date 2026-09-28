@@ -119,6 +119,7 @@ export interface Memory {
   securityLevel: 'Alta Custodia' | 'Doble Llave' | 'Fecha Fija' | 'Inmediata';
   hasVoiceNote?: boolean;
   audioDuration?: string;
+  audioUrl?: string;
   videoDuration?: string;
   videoThumbnail?: string;
   compatibility: {

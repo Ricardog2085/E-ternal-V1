@@ -29,23 +29,131 @@ function saveLocalPeople(people: Person[]): void {
 }
 
 /**
+ * Obtiene o crea el perfil principal del usuario autenticado (Owner Person).
+ * Flujo:
+ * auth.uid()
+ * ↓
+ * people.user_id
+ * ↓
+ * people.id
+ */
+export async function ensureOwnerPerson(): Promise<Person> {
+  if (isSupabaseConfigured() && supabase) {
+    let user: any = null;
+
+    try {
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      if (!userError && userData?.user) {
+        user = userData.user;
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!user) {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.user) {
+          user = sessionData.session.user;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!user) {
+      // Intentar iniciar sesión anónima si está habilitada en el proyecto
+      try {
+        const { data: anonData, error: anonError } = await supabase.auth.signInAnonymously();
+        if (!anonError && anonData?.user) {
+          user = anonData.user;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!user) {
+      throw new Error(
+        'No hay una sesión de usuario activa en Supabase (auth.uid() no disponible). Para cumplir con las políticas RLS ("auth.uid() = user_id"), inicia sesión o habilita Anonymous Sign-Ins en Authentication -> Providers -> Anonymous.'
+      );
+    }
+
+    // Buscar en la tabla people donde user_id = auth.uid()
+    const { data: peopleList, error: peopleError } = await supabase
+      .from('people')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('status', 'active')
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    if (peopleError) {
+      throw new Error(`Error consultando personas en Supabase: ${peopleError.message}`);
+    }
+
+    if (peopleList && peopleList.length > 0) {
+      return peopleList[0] as Person;
+    }
+
+    // Si no existe, crear el perfil principal del usuario en la tabla people
+    const userMeta = user.user_metadata || {};
+    const fullName = userMeta.full_name || userMeta.name || user.email?.split('@')[0] || 'Titular E-Ternal';
+    const parts = fullName.trim().split(' ');
+    const firstName = parts[0] || 'Titular';
+    const lastName = parts.slice(1).join(' ') || '';
+
+    const { data: newPerson, error: insertError } = await supabase
+      .from('people')
+      .insert([
+        {
+          user_id: user.id,
+          first_name: firstName,
+          last_name: lastName || null,
+          display_name: fullName,
+          status: 'active',
+          bio: 'Titular de la Bóveda E-Ternal',
+        },
+      ])
+      .select()
+      .single();
+
+    if (insertError || !newPerson) {
+      throw new Error(`Error creando perfil del titular en Supabase: ${insertError?.message || 'Error desconocido'}`);
+    }
+
+    return newPerson as Person;
+  }
+
+  // Fallback si Supabase no está configurado (modo preview sin credenciales)
+  const local = getLocalPeople();
+  const existing = local.find((p) => p.status === 'active') || local[0];
+  if (existing) return existing;
+
+  return createPerson({
+    first_name: 'Titular',
+    last_name: 'E-Ternal',
+    display_name: 'Titular E-Ternal',
+    status: 'active',
+    bio: 'Perfil principal de E-Ternal',
+  });
+}
+
+/**
  * Obtiene todas las personas registradas.
  */
 export async function getPeople(): Promise<Person[]> {
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('people')
-        .select('*')
-        .order('created_at', { ascending: true });
+    const { data, error } = await supabase
+      .from('people')
+      .select('*')
+      .order('created_at', { ascending: true });
 
-      if (error) throw error;
-      if (data && data.length > 0) {
-        saveLocalPeople(data as Person[]);
-        return data as Person[];
-      }
-    } catch (err) {
-      console.warn('Supabase getPeople error, falling back to local storage:', err);
+    if (error) {
+      console.warn('Supabase getPeople error, falling back to local cache:', error.message);
+    } else if (data && data.length > 0) {
+      saveLocalPeople(data as Person[]);
+      return data as Person[];
     }
   }
 
@@ -57,17 +165,16 @@ export async function getPeople(): Promise<Person[]> {
  */
 export async function getPersonById(id: string): Promise<Person | null> {
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('people')
-        .select('*')
-        .eq('id', id)
-        .single();
+    const { data, error } = await supabase
+      .from('people')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-      if (error) throw error;
-      return (data as Person) || null;
-    } catch (err) {
-      console.warn(`Supabase getPersonById error for ${id}, using local:`, err);
+    if (error) {
+      console.warn(`Supabase getPersonById error for ${id}:`, error.message);
+    } else if (data) {
+      return data as Person;
     }
   }
 
@@ -100,21 +207,19 @@ export async function createPerson(
   };
 
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('people')
-        .insert([newPerson])
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('people')
+      .insert([newPerson])
+      .select()
+      .single();
 
-      if (error) throw error;
-      if (data) {
-        const currentLocal = getLocalPeople();
-        saveLocalPeople([...currentLocal, data as Person]);
-        return data as Person;
-      }
-    } catch (err) {
-      console.warn('Supabase createPerson error, saving locally:', err);
+    if (error) {
+      throw new Error(`Error en Supabase al crear persona: ${error.message}`);
+    }
+    if (data) {
+      const currentLocal = getLocalPeople();
+      saveLocalPeople([...currentLocal, data as Person]);
+      return data as Person;
     }
   }
 
@@ -135,22 +240,20 @@ export async function updatePerson(
   const payload = { ...updates, updated_at: now };
 
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('people')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('people')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
 
-      if (error) throw error;
-      if (data) {
-        const local = getLocalPeople().map((p) => (p.id === id ? (data as Person) : p));
-        saveLocalPeople(local);
-        return data as Person;
-      }
-    } catch (err) {
-      console.warn(`Supabase updatePerson error for ${id}:`, err);
+    if (error) {
+      throw new Error(`Error en Supabase al actualizar persona: ${error.message}`);
+    }
+    if (data) {
+      const local = getLocalPeople().map((p) => (p.id === id ? (data as Person) : p));
+      saveLocalPeople(local);
+      return data as Person;
     }
   }
 
@@ -171,11 +274,9 @@ export async function updatePerson(
  */
 export async function deletePerson(id: string): Promise<void> {
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { error } = await supabase.from('people').delete().eq('id', id);
-      if (error) throw error;
-    } catch (err) {
-      console.warn(`Supabase deletePerson error for ${id}:`, err);
+    const { error } = await supabase.from('people').delete().eq('id', id);
+    if (error) {
+      throw new Error(`Error en Supabase al eliminar persona: ${error.message}`);
     }
   }
 

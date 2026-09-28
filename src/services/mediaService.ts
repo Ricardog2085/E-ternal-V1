@@ -23,6 +23,113 @@ function saveLocalMediaAssets(assets: MediaAsset[]): void {
   }
 }
 
+export interface UploadMemoryMediaParams {
+  personId: string;
+  memoryId: string;
+  audioBlob: Blob;
+  mimeType: string;
+  durationSeconds?: number;
+}
+
+export interface UploadMemoryMediaResult {
+  path: string;
+  publicUrl: string;
+  asset: MediaAsset;
+}
+
+/**
+ * Función estricta requerida por FASE 1.5:
+ * Sube el audio real grabado desde el micrófono a Supabase Storage y registra en public.media_assets.
+ * No utiliza fallbacks locales: lanza error si cualquier paso falla.
+ */
+export async function uploadMemoryMediaToSupabase(
+  params: UploadMemoryMediaParams
+): Promise<UploadMemoryMediaResult> {
+  const { personId, memoryId, audioBlob, mimeType, durationSeconds } = params;
+
+  if (!isSupabaseConfigured() || !supabase) {
+    throw new Error(
+      'Supabase no está configurado. Por favor define VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY en Secrets de AI Studio para subir el audio real a Supabase Storage.'
+    );
+  }
+
+  // Deducción de extensión de archivo según el mimeType real
+  let extension = 'm4a';
+  if (mimeType.includes('webm')) {
+    extension = 'webm';
+  } else if (mimeType.includes('ogg')) {
+    extension = 'ogg';
+  } else if (mimeType.includes('wav')) {
+    extension = 'wav';
+  } else if (mimeType.includes('mp3') || mimeType.includes('mpeg')) {
+    extension = 'mp3';
+  } else if (mimeType.includes('mp4') || mimeType.includes('aac')) {
+    extension = 'm4a';
+  }
+
+  const filename = `audio_${Date.now()}.${extension}`;
+  const storagePath = `people/${personId}/memories/${memoryId}/${filename}`;
+
+  // 1. Subir a Supabase Storage en el bucket privado 'eternal-media'
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(storagePath, audioBlob, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: mimeType,
+    });
+
+  if (uploadError) {
+    throw new Error(`Error en Supabase Storage (${BUCKET_NAME}): ${uploadError.message}`);
+  }
+
+  // 2. Generar signed URL privada (86400 seg = 24h)
+  const { data: signedData, error: signedError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .createSignedUrl(storagePath, 86400);
+
+  if (signedError || !signedData?.signedUrl) {
+    throw new Error(`Error al generar Signed URL para el archivo: ${signedError?.message || 'Error desconocido'}`);
+  }
+
+  const publicUrl = signedData.signedUrl;
+
+  // 3. Registrar metadatos en la tabla media_assets
+  const assetPayload: Omit<MediaAsset, 'id' | 'created_at'> = {
+    memory_id: memoryId,
+    person_id: personId,
+    storage_path: storagePath,
+    public_url: publicUrl,
+    media_type: 'audio',
+    mime_type: mimeType,
+    file_size: audioBlob.size,
+    duration_seconds: durationSeconds ? Math.round(durationSeconds) : null,
+    transcript: null,
+  };
+
+  const { data: assetData, error: assetError } = await supabase
+    .from('media_assets')
+    .insert([assetPayload])
+    .select()
+    .single();
+
+  if (assetError || !assetData) {
+    throw new Error(
+      `El archivo se subió a Storage pero falló la inserción en la tabla media_assets: ${assetError?.message || 'Error desconocido'}`
+    );
+  }
+
+  // Guardar en caché local para acceso offline
+  const local = getLocalMediaAssets();
+  saveLocalMediaAssets([assetData as MediaAsset, ...local]);
+
+  return {
+    path: storagePath,
+    publicUrl,
+    asset: assetData as MediaAsset,
+  };
+}
+
 /**
  * Registra los metadatos de un archivo multimedia en la tabla media_assets.
  */
@@ -48,21 +155,19 @@ export async function createMediaAsset(
   };
 
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('media_assets')
-        .insert([newAsset])
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('media_assets')
+      .insert([newAsset])
+      .select()
+      .single();
 
-      if (error) throw error;
-      if (data) {
-        const local = getLocalMediaAssets();
-        saveLocalMediaAssets([...local, data as MediaAsset]);
-        return data as MediaAsset;
-      }
-    } catch (err) {
-      console.warn('Supabase createMediaAsset error, saving locally:', err);
+    if (error) {
+      throw new Error(`Error registrando media_asset en Supabase: ${error.message}`);
+    }
+    if (data) {
+      const local = getLocalMediaAssets();
+      saveLocalMediaAssets([...local, data as MediaAsset]);
+      return data as MediaAsset;
     }
   }
 
@@ -76,17 +181,16 @@ export async function createMediaAsset(
  */
 export async function getMediaAssetsByMemoryId(memoryId: string): Promise<MediaAsset[]> {
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('media_assets')
-        .select('*')
-        .eq('memory_id', memoryId)
-        .order('created_at', { ascending: true });
+    const { data, error } = await supabase
+      .from('media_assets')
+      .select('*')
+      .eq('memory_id', memoryId)
+      .order('created_at', { ascending: true });
 
-      if (error) throw error;
-      if (data) return data as MediaAsset[];
-    } catch (err) {
-      console.warn(`Supabase getMediaAssetsByMemoryId error for ${memoryId}:`, err);
+    if (error) {
+      console.warn(`Supabase getMediaAssetsByMemoryId error for ${memoryId}:`, error.message);
+    } else if (data) {
+      return data as MediaAsset[];
     }
   }
 
@@ -116,55 +220,4 @@ export async function getSignedUrl(
     console.warn(`Error generating signed URL for ${storagePath}:`, err);
     return null;
   }
-}
-
-/**
- * Sube un archivo binario a Supabase Storage en la ruta privada estructurada:
- * /people/{person_id}/memories/{memory_id}/{filename}
- */
-export async function uploadMemoryMedia(
-  personId: string,
-  memoryId: string,
-  file: Blob | File,
-  mediaType: MediaType,
-  customFilename?: string
-): Promise<{ path: string; publicUrl?: string | null }> {
-  const extension = file.type ? file.type.split('/')[1] || 'bin' : 'bin';
-  const name = customFilename || `${mediaType}_${Date.now()}.${extension}`;
-  const storagePath = `people/${personId}/memories/${memoryId}/${name}`;
-
-  if (isSupabaseConfigured() && supabase) {
-    try {
-      const { error: uploadError } = await supabase.storage
-        .from(BUCKET_NAME)
-        .upload(storagePath, file, {
-          cacheControl: '3600',
-          upsert: true,
-          contentType: file.type || undefined,
-        });
-
-      if (uploadError) throw uploadError;
-
-      // Intentamos obtener URL firmada inmediata para previsualización
-      const signedUrl = await getSignedUrl(storagePath, 7200);
-
-      // Creamos el registro en media_assets
-      await createMediaAsset({
-        memory_id: memoryId,
-        person_id: personId,
-        storage_path: storagePath,
-        public_url: signedUrl,
-        media_type: mediaType,
-        mime_type: file.type || null,
-        file_size: file.size,
-      });
-
-      return { path: storagePath, publicUrl: signedUrl };
-    } catch (err) {
-      console.warn('Supabase uploadMemoryMedia error:', err);
-    }
-  }
-
-  // Fallback simulado para entorno local / preview sin credenciales de storage
-  return { path: storagePath, publicUrl: null };
 }

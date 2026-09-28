@@ -124,33 +124,31 @@ export async function createMemory(
   };
 
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('memories')
-        .insert([newMemory])
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('memories')
+      .insert([newMemory])
+      .select()
+      .single();
 
-      if (error) throw error;
-      if (data) {
-        const local = getLocalDbMemories();
-        saveLocalDbMemories([data as DbMemory, ...local]);
+    if (error) {
+      throw new Error(`Error en Supabase al crear memoria: ${error.message}`);
+    }
+    if (data) {
+      const local = getLocalDbMemories();
+      saveLocalDbMemories([data as DbMemory, ...local]);
 
-        // Vinculación en tabla memory_people
-        if (relatedPeopleIds && relatedPeopleIds.length > 0) {
-          for (const pid of relatedPeopleIds) {
-            await createMemoryPerson({
-              memory_id: data.id,
-              person_id: pid,
-              relationship_context: 'Familiar vinculado',
-            });
-          }
+      // Vinculación en tabla memory_people
+      if (relatedPeopleIds && relatedPeopleIds.length > 0) {
+        for (const pid of relatedPeopleIds) {
+          await createMemoryPerson({
+            memory_id: data.id,
+            person_id: pid,
+            relationship_context: 'Familiar vinculado',
+          });
         }
-
-        return data as DbMemory;
       }
-    } catch (err) {
-      console.warn('Supabase createMemory error, saving locally:', err);
+
+      return data as DbMemory;
     }
   }
 
@@ -181,22 +179,20 @@ export async function updateMemory(
   const payload = { ...updates, updated_at: now };
 
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('memories')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('memories')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
 
-      if (error) throw error;
-      if (data) {
-        const local = getLocalDbMemories().map((m) => (m.id === id ? (data as DbMemory) : m));
-        saveLocalDbMemories(local);
-        return data as DbMemory;
-      }
-    } catch (err) {
-      console.warn(`Supabase updateMemory error for ${id}:`, err);
+    if (error) {
+      throw new Error(`Error en Supabase al actualizar memoria: ${error.message}`);
+    }
+    if (data) {
+      const local = getLocalDbMemories().map((m) => (m.id === id ? (data as DbMemory) : m));
+      saveLocalDbMemories(local);
+      return data as DbMemory;
     }
   }
 
@@ -217,11 +213,9 @@ export async function updateMemory(
  */
 export async function deleteMemory(id: string): Promise<void> {
   if (isSupabaseConfigured() && supabase) {
-    try {
-      const { error } = await supabase.from('memories').delete().eq('id', id);
-      if (error) throw error;
-    } catch (err) {
-      console.warn(`Supabase deleteMemory error for ${id}:`, err);
+    const { error } = await supabase.from('memories').delete().eq('id', id);
+    if (error) {
+      throw new Error(`Error en Supabase al eliminar memoria: ${error.message}`);
     }
   }
 
@@ -282,6 +276,7 @@ export function mapDbMemoryToUiMemory(
     securityLevel: dbMem.importance === 'critical' ? 'Alta Custodia' : 'Fecha Fija',
     hasVoiceNote: memoryType === 'voz',
     audioDuration: memoryType === 'voz' ? durationFormatted : undefined,
+    audioUrl: audioMedia?.public_url || undefined,
     videoDuration: memoryType === 'video' ? durationFormatted : undefined,
     videoThumbnail: videoMedia?.thumbnail_url || undefined,
     compatibility: {

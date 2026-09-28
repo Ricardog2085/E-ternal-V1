@@ -28,8 +28,11 @@ import {
 import { 
   getPeople as fetchDbPeople, 
   createPerson as createDbPerson, 
+  ensureOwnerPerson,
   familyMemberToPersonData 
 } from './services/peopleService';
+import { uploadMemoryMediaToSupabase } from './services/mediaService';
+import { isSupabaseConfigured } from './lib/supabase';
 
 const STORAGE_KEYS = {
   MEMORIES: 'eternal_memories_v1',
@@ -138,42 +141,80 @@ export default function App() {
     setIsAudioActive(newState);
   };
 
-  const handleAddMemory = async (newMem: Memory) => {
-    // 1. Actualización optimista de la UI
-    setMemories((prev) => [newMem, ...prev]);
+  const handleAddMemory = async (
+    newMem: Memory,
+    audioBlob?: Blob,
+    audioMimeType?: string,
+    durationSeconds?: number
+  ) => {
+    let ownerPersonId: string;
+    let createdDbMemId: string = newMem.id;
+    let signedAudioUrl: string | undefined = undefined;
 
-    // 2. Persistencia en la capa de datos (Supabase / MemoryService)
-    try {
-      const defaultAuthorId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'; // Enrique Morales (autor por defecto)
-      const dbPayload = mapUiMemoryToDbMemoryData(newMem, defaultAuthorId);
-      await createDbMemory(dbPayload);
-    } catch (err) {
-      console.warn('[E-Ternal] Error guardando recuerdo en memoryService:', err);
+    // 1. Obtener la persona principal (Owner) según supabase.auth.getUser()
+    // Flujo requerido: auth.uid() -> people.user_id -> people.id
+    const owner = await ensureOwnerPerson();
+    ownerPersonId = owner.id;
+
+    // 2. Crear el registro memories en Supabase
+    const dbPayload = mapUiMemoryToDbMemoryData(newMem, ownerPersonId);
+
+    // Buscar si el destinatario corresponde a un familiar registrado para vincular en memory_people
+    const targetMember = familyMembers.find(
+      (fam) => fam.name.toLowerCase() === newMem.recipient.toLowerCase()
+    );
+    const relatedPeopleIds = targetMember?.personId ? [targetMember.personId] : undefined;
+
+    const createdMemory = await createDbMemory(dbPayload, relatedPeopleIds);
+    createdDbMemId = createdMemory.id;
+
+    // 3. Si hay audio grabado real, subir a Supabase Storage y registrar en media_assets
+    if (audioBlob) {
+      const uploadResult = await uploadMemoryMediaToSupabase({
+        personId: ownerPersonId,
+        memoryId: createdDbMemId,
+        audioBlob,
+        mimeType: audioMimeType || 'audio/mp4',
+        durationSeconds,
+      });
+      signedAudioUrl = uploadResult.publicUrl;
     }
 
-    // 3. Actualizar contador del familiar en el círculo de afectos
+    // 4. Actualizar el objeto Memory para la UI con el ID real y la URL del audio
+    const synchronizedMem: Memory = {
+      ...newMem,
+      id: createdDbMemId,
+      dbId: createdDbMemId,
+      authorPersonId: ownerPersonId,
+      audioUrl: signedAudioUrl || newMem.audioUrl,
+    };
+
+    // Actualización de estado en UI
+    setMemories((prev) => [synchronizedMem, ...prev]);
+
+    // 5. Actualizar contador del familiar en el círculo de afectos
     setFamilyMembers((prev) =>
       prev.map((fam) => {
-        if (fam.name.toLowerCase() === newMem.recipient.toLowerCase()) {
+        if (fam.name.toLowerCase() === synchronizedMem.recipient.toLowerCase()) {
           return { ...fam, assignedMemoriesCount: fam.assignedMemoriesCount + 1 };
         }
         return fam;
       })
     );
 
-    // 4. Crear registro en calendario temporal de entregas
+    // 6. Crear registro en calendario temporal de entregas
     const newDelivery: DeliverySchedule = {
       id: `del-${Date.now()}`,
-      memoryId: newMem.id,
-      memoryTitle: newMem.title,
-      recipientName: newMem.recipient,
-      relation: newMem.recipientRelation,
-      triggerType: newMem.releaseDate ? 'fecha' : 'hito',
-      triggerLabel: newMem.releaseCondition,
-      scheduledYear: newMem.releaseDate ? new Date(newMem.releaseDate).getFullYear() || 2030 : 2030,
-      scheduledDateFormatted: newMem.releaseDate || 'Hito Vital',
+      memoryId: synchronizedMem.id,
+      memoryTitle: synchronizedMem.title,
+      recipientName: synchronizedMem.recipient,
+      relation: synchronizedMem.recipientRelation,
+      triggerType: synchronizedMem.releaseDate ? 'fecha' : 'hito',
+      triggerLabel: synchronizedMem.releaseCondition,
+      scheduledYear: synchronizedMem.releaseDate ? new Date(synchronizedMem.releaseDate).getFullYear() || 2030 : 2030,
+      scheduledDateFormatted: synchronizedMem.releaseDate || 'Hito Vital',
       status: 'Programada',
-      custodiansRequired: newMem.securityLevel === 'Doble Llave' ? 2 : 1,
+      custodiansRequired: synchronizedMem.securityLevel === 'Doble Llave' ? 2 : 1,
       custodiansConfirmed: 1,
     };
     setDeliveries((prev) => [newDelivery, ...prev]);
