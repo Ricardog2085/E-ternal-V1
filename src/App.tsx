@@ -5,18 +5,22 @@
 
 import React, { useState, useEffect } from 'react';
 import { Header, TabType } from './components/Header';
+import { PersonaPerfilTab } from './components/PersonaPerfilTab';
+import { HistoriaTab } from './components/HistoriaTab';
 import { BovedaTab } from './components/BovedaTab';
+import { MultimediaTab } from './components/MultimediaTab';
 import { FamiliaTab } from './components/FamiliaTab';
 import { EntregasTab } from './components/EntregasTab';
 import { AvatarTab } from './components/AvatarTab';
 import { ModoFuturoTab } from './components/ModoFuturoTab';
 import { MemoryReaderModal } from './components/MemoryReaderModal';
+import { NewMemoryModal } from './components/NewMemoryModal';
 import { 
   INITIAL_MEMORIES, 
   INITIAL_FAMILY, 
   INITIAL_DELIVERIES 
 } from './data/initialData';
-import { Memory, FamilyMember, DeliverySchedule } from './types/eternal';
+import { Memory, FamilyMember, DeliverySchedule, Person } from './types/eternal';
 import { toggleAmbientSound } from './utils/audioAmbience';
 import { ShieldCheck, Infinity, Feather } from 'lucide-react';
 import { 
@@ -41,7 +45,11 @@ const STORAGE_KEYS = {
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabType>('boveda');
+  // Pestaña inicial: 'perfil' para reflejar la experiencia centrada en la persona
+  const [activeTab, setActiveTab] = useState<TabType>('perfil');
+
+  // Estado del titular (Person)
+  const [ownerPerson, setOwnerPerson] = useState<Person | null>(null);
 
   // Load from localStorage with fallback to initial data
   const [memories, setMemories] = useState<Memory[]>(() => {
@@ -76,6 +84,7 @@ export default function App() {
 
   const [isAudioActive, setIsAudioActive] = useState<boolean>(false);
   const [selectedModalMemory, setSelectedModalMemory] = useState<Memory | null>(null);
+  const [isGlobalNewModalOpen, setIsGlobalNewModalOpen] = useState(false);
 
   // Load initial data from Supabase Service Layer on mount
   useEffect(() => {
@@ -83,6 +92,16 @@ export default function App() {
 
     async function initDatabaseLayer() {
       try {
+        // Cargar o inicializar la persona titular
+        try {
+          const owner = await ensureOwnerPerson();
+          if (isMounted && owner) {
+            setOwnerPerson(owner);
+          }
+        } catch (ownerErr) {
+          console.info('[E-Ternal] Titular local inicializado:', ownerErr);
+        }
+
         const [peopleFromDb, memoriesFromDb] = await Promise.all([
           fetchDbPeople(),
           fetchDbMemories(),
@@ -90,7 +109,6 @@ export default function App() {
 
         if (isMounted) {
           if (peopleFromDb && peopleFromDb.length > 0) {
-            // Sincronizar personas en el estado familiar si no hay cambios locales previos
             console.info(`[E-Ternal] ${peopleFromDb.length} personas recuperadas de la capa de datos.`);
           }
           if (memoriesFromDb && memoriesFromDb.length > 0) {
@@ -141,6 +159,14 @@ export default function App() {
     setIsAudioActive(newState);
   };
 
+  /**
+   * Pipeline de creación de recuerdos y subida de audio:
+   * 1. auth.uid() -> people.user_id -> people.id (ownerPersonId)
+   * 2. Insert en tabla memories -> obtiene UUID real
+   * 3. Si hay audioBlob: sube a Storage en 'eternal-media' (people/{person_id}/memories/{memory_id}/{filename})
+   * 4. Genera signed URL y registra en tabla media_assets vinculada al UUID real
+   * 5. No oculta errores de Supabase si la configuración o políticas fallan
+   */
   const handleAddMemory = async (
     newMem: Memory,
     audioBlob?: Blob,
@@ -152,9 +178,9 @@ export default function App() {
     let signedAudioUrl: string | undefined = undefined;
 
     // 1. Obtener la persona principal (Owner) según supabase.auth.getUser()
-    // Flujo requerido: auth.uid() -> people.user_id -> people.id
     const owner = await ensureOwnerPerson();
     ownerPersonId = owner.id;
+    setOwnerPerson(owner);
 
     // 2. Crear el registro memories en Supabase
     const dbPayload = mapUiMemoryToDbMemoryData(newMem, ownerPersonId);
@@ -218,13 +244,13 @@ export default function App() {
       custodiansConfirmed: 1,
     };
     setDeliveries((prev) => [newDelivery, ...prev]);
+    setIsGlobalNewModalOpen(false);
   };
 
   const handleDeleteMemory = async (id: string) => {
     const memToDelete = memories.find((m) => m.id === id);
     setMemories((prev) => prev.filter((m) => m.id !== id));
 
-    // Persistencia en capa de servicio Supabase
     try {
       await deleteDbMemory(id);
     } catch (err) {
@@ -244,10 +270,8 @@ export default function App() {
   };
 
   const handleAddFamilyMember = async (newMember: FamilyMember) => {
-    // 1. Actualización en UI
     setFamilyMembers((prev) => [...prev, newMember]);
 
-    // 2. Persistencia en la capa de datos (Supabase / PeopleService)
     try {
       const personData = familyMemberToPersonData(newMember);
       await createDbPerson(personData);
@@ -258,18 +282,41 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FDFBF7] text-[#2C241E] flex flex-col font-sans selection:bg-[#D4AF37]/25 selection:text-[#2C241E]">
-      {/* Header with Infinity Logo, Tabs, and PWA Install */}
+      {/* Header con las 7 ramas de la Persona y PWA Install */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isAudioPlaying={isAudioActive}
         onToggleAudio={handleToggleAudio}
         memoriesCount={memories.length}
+        personName={ownerPerson?.display_name || 'Enrique Morales'}
       />
 
-      {/* Main Content Area */}
+      {/* Main Content Area: Estructura de la Persona */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-        {activeTab === 'boveda' && (
+        {/* 1. PERFIL DIGITAL */}
+        {activeTab === 'perfil' && (
+          <PersonaPerfilTab
+            person={ownerPerson}
+            memories={memories}
+            familyMembers={familyMembers}
+            deliveries={deliveries}
+            onNavigate={(tab) => setActiveTab(tab)}
+            onOpenNewMemory={() => setIsGlobalNewModalOpen(true)}
+          />
+        )}
+
+        {/* 2. HISTORIA / INICIO */}
+        {activeTab === 'historia' && (
+          <HistoriaTab
+            memories={memories}
+            onOpenMemory={(mem) => setSelectedModalMemory(mem)}
+            onNavigateToRecuerdos={() => setActiveTab('recuerdos')}
+          />
+        )}
+
+        {/* 3. RECUERDOS (BÓVEDA DE ENTIDADES INDEPENDIENTES) */}
+        {(activeTab === 'recuerdos' || activeTab === 'boveda') && (
           <BovedaTab
             memories={memories}
             onAddMemory={handleAddMemory}
@@ -278,6 +325,16 @@ export default function App() {
           />
         )}
 
+        {/* 4. MULTIMEDIA (AUDIOS REALES, VIDEOS Y CARTAS) */}
+        {activeTab === 'multimedia' && (
+          <MultimediaTab
+            memories={memories}
+            onOpenMemory={(mem) => setSelectedModalMemory(mem)}
+            onOpenNewMemory={() => setIsGlobalNewModalOpen(true)}
+          />
+        )}
+
+        {/* 5. FAMILIA Y CUSTODIA */}
         {activeTab === 'familia' && (
           <FamiliaTab
             familyMembers={familyMembers}
@@ -285,33 +342,48 @@ export default function App() {
           />
         )}
 
+        {/* 6. ENTREGAS PROGRAMADAS */}
         {activeTab === 'entregas' && (
           <EntregasTab deliveries={deliveries} />
         )}
 
-        {activeTab === 'avatar' && (
-          <AvatarTab memories={memories} />
-        )}
-
+        {/* 7. CONVERSACIÓN FUTURA / MODO FUTURO */}
         {activeTab === 'futuro' && (
           <ModoFuturoTab
             memories={memories}
             onOpenMemory={(mem) => setSelectedModalMemory(mem)}
           />
         )}
+
+        {/* MODO AVATAR (COMPATIBILIDAD) */}
+        {activeTab === 'avatar' && (
+          <AvatarTab memories={memories} />
+        )}
       </main>
 
-      {/* Reader Modal */}
-      <MemoryReaderModal
-        memory={selectedModalMemory}
-        onClose={() => setSelectedModalMemory(null)}
-      />
+      {/* Reader Modal Individual */}
+      {selectedModalMemory && (
+        <MemoryReaderModal
+          memory={selectedModalMemory}
+          onClose={() => setSelectedModalMemory(null)}
+        />
+      )}
+
+      {/* Modal Global de Nuevo Recuerdo */}
+      {isGlobalNewModalOpen && (
+        <NewMemoryModal
+          isOpen={isGlobalNewModalOpen}
+          onClose={() => setIsGlobalNewModalOpen(false)}
+          onSave={handleAddMemory}
+          familyMembers={familyMembers}
+        />
+      )}
 
       {/* Premium Solemn Editorial Footer in Cream, Gold & White */}
       <footer className="bg-[#FAF7F2] text-[#2C241E] border-t border-[#EFE8DE] mt-16 shadow-soft">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
           <div className="flex flex-col md:flex-row items-center justify-between gap-6 pb-8 border-b border-[#EFE8DE] text-center md:text-left">
-            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('boveda')}>
+            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('perfil')}>
               <div className="w-10 h-10 rounded-2xl bg-white border border-[#D4AF37]/50 flex items-center justify-center text-[#D4AF37] shadow-soft">
                 <Infinity className="w-5 h-5" />
               </div>
@@ -320,7 +392,7 @@ export default function App() {
                   E-ternal
                 </span>
                 <span className="text-xs text-[#6B5E55] block font-light">
-                  Guardián de la Memoria · Bóveda Cifrada
+                  Persona · Memoria · Bóveda Privada Cifrada
                 </span>
               </div>
             </div>

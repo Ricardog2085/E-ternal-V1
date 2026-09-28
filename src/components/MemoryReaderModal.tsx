@@ -234,53 +234,70 @@ export const MemoryReaderModal: React.FC<MemoryReaderModalProps> = ({ memory, on
               </div>
 
               {/* Audio Voice Player if applicable */}
-              {memory.hasVoiceNote && (
+              {(memory.hasVoiceNote || memory.audioUrl) && (
                 <div className="bg-[#FAF7F2] text-[#2C241E] p-5 rounded-2xl shadow-soft space-y-3 border border-[#D4AF37]/50">
                   <div className="flex items-center justify-between text-xs">
                     <div className="flex items-center space-x-2 text-[#A88720]">
                       <Volume2 className="w-4 h-4 text-[#D4AF37]" />
                       <span className="font-semibold tracking-wide uppercase">Registro de Voz Auténtica</span>
                     </div>
-                    <span className="text-[#6B5E55] font-mono">{memory.audioDuration || '04:18'}</span>
+                    <span className="text-[#6B5E55] font-mono">{memory.audioDuration || memory.duration || '01:00'}</span>
                   </div>
 
-                  <div className="flex items-center space-x-4">
-                    <button
-                      onClick={togglePlayAudio}
-                      className="w-11 h-11 rounded-full bg-[#D4AF37] text-white flex items-center justify-center hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-gold-subtle"
-                      title={isPlayingAudio ? 'Pausar audio' : 'Reproducir voz'}
-                    >
-                      {isPlayingAudio ? (
-                        <div className="flex space-x-1">
-                          <span className="w-1 h-3.5 bg-white rounded-full" />
-                          <span className="w-1 h-3.5 bg-white rounded-full" />
-                        </div>
-                      ) : (
-                        <div className="w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-white ml-1" />
-                      )}
-                    </button>
-
-                    {/* Simulated Waveform */}
-                    <div className="flex-1 flex items-center space-x-1 h-8">
-                      {[14, 28, 45, 70, 85, 40, 60, 95, 80, 50, 65, 30, 85, 90, 75, 45, 60, 35, 70, 80, 40, 25, 55, 65, 90, 40, 30, 20].map((h, i) => {
-                        const active = (i / 28) * 100 <= audioProgress;
-                        return (
-                          <div
-                            key={i}
-                            className={`flex-1 rounded-full transition-all duration-150 ${
-                              active ? 'bg-[#D4AF37]' : 'bg-[#D8C9B4]'
-                            }`}
-                            style={{ height: `${h}%` }}
-                          />
-                        );
-                      })}
+                  {memory.audioUrl ? (
+                    <div className="space-y-2">
+                      <audio
+                        controls
+                        src={memory.audioUrl}
+                        className="w-full h-11 outline-none"
+                        preload="metadata"
+                      />
+                      <div className="flex justify-between text-[11px] text-[#8C7A6B]">
+                        <span>Grabación real resguardada</span>
+                        <span>Voz del titular</span>
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center space-x-4">
+                        <button
+                          onClick={togglePlayAudio}
+                          className="w-11 h-11 rounded-full bg-[#D4AF37] text-white flex items-center justify-center hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-gold-subtle"
+                          title={isPlayingAudio ? 'Pausar audio' : 'Reproducir voz'}
+                        >
+                          {isPlayingAudio ? (
+                            <div className="flex space-x-1">
+                              <span className="w-1 h-3.5 bg-white rounded-full" />
+                              <span className="w-1 h-3.5 bg-white rounded-full" />
+                            </div>
+                          ) : (
+                            <div className="w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-white ml-1" />
+                          )}
+                        </button>
 
-                  <div className="flex justify-between text-[11px] text-[#8C7A6B]">
-                    <span>Voz masterizada sin alteraciones</span>
-                    <span>Tono: Serena, Paternal</span>
-                  </div>
+                        {/* Simulated Waveform */}
+                        <div className="flex-1 flex items-center space-x-1 h-8">
+                          {[14, 28, 45, 70, 85, 40, 60, 95, 80, 50, 65, 30, 85, 90, 75, 45, 60, 35, 70, 80, 40, 25, 55, 65, 90, 40, 30, 20].map((h, i) => {
+                            const active = (i / 28) * 100 <= audioProgress;
+                            return (
+                              <div
+                                key={i}
+                                className={`flex-1 rounded-full transition-all duration-150 ${
+                                  active ? 'bg-[#D4AF37]' : 'bg-[#D8C9B4]'
+                                }`}
+                                style={{ height: `${h}%` }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between text-[11px] text-[#8C7A6B]">
+                        <span>Voz masterizada sin alteraciones</span>
+                        <span>Tono: Serena, Paternal</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 

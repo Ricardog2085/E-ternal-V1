@@ -267,6 +267,17 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
                         ))}
                       </div>
                     </div>
+
+                    {mem.audioUrl && (
+                      <div className="pt-1" onClick={(e) => e.stopPropagation()}>
+                        <audio
+                          controls
+                          src={mem.audioUrl}
+                          className="w-full h-8 outline-none"
+                          preload="metadata"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -362,18 +373,22 @@ export const BovedaTab: React.FC<BovedaTabProps> = ({
       </div>
 
       {/* Reader Modal */}
-      <MemoryReaderModal
-        memory={activeMemory}
-        onClose={() => setActiveMemory(null)}
-      />
+      {activeMemory && (
+        <MemoryReaderModal
+          memory={activeMemory}
+          onClose={() => setActiveMemory(null)}
+        />
+      )}
 
       {/* New Memory Modal */}
-      <NewMemoryModal
-        isOpen={isNewModalOpen}
-        onClose={() => setIsNewModalOpen(false)}
-        onSave={onAddMemory}
-        familyMembers={familyMembers}
-      />
+      {isNewModalOpen && (
+        <NewMemoryModal
+          isOpen={isNewModalOpen}
+          onClose={() => setIsNewModalOpen(false)}
+          onSave={onAddMemory}
+          familyMembers={familyMembers}
+        />
+      )}
     </div>
   );
 };

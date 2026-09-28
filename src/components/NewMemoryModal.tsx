@@ -16,7 +16,8 @@ import {
   AlertCircle,
   RotateCcw,
   Loader2,
-  Volume2
+  Volume2,
+  Activity
 } from 'lucide-react';
 import { Memory, FamilyMember } from '../types/eternal';
 
@@ -32,30 +33,55 @@ interface NewMemoryModalProps {
   familyMembers?: FamilyMember[];
 }
 
+interface AudioDiagnostics {
+  tracksCount: number;
+  trackEnabled: boolean;
+  trackReadyState: string;
+  trackMuted: boolean;
+  mimeTypeUsed: string;
+  blobSize: number;
+  blobType: string;
+}
+
 /**
- * Detecta el mejor formato de audio soportado por el navegador (Safari iOS / Chrome / etc.)
+ * Detecta el formato óptimo soportado por el navegador (Safari iOS / iPhone / Chrome / etc.)
+ * Se prioriza formato nativo real evitando tipos que produzcan contenedores vacíos o ruido.
  */
-function getBestAudioMimeType(): string {
+function getSupportedAudioMimeType(): string {
   if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
-    return 'audio/mp4';
+    return '';
   }
 
-  const preferredCandidates = [
-    'audio/mp4',
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/ogg;codecs=opus',
-    'audio/aac',
-    'audio/wav',
-  ];
+  const isSafariOrIOS =
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome'));
 
-  for (const candidate of preferredCandidates) {
+  // En Safari / iOS audio/mp4 y audio/aac son los formatos con codificador de hardware nativo.
+  // En Chrome y navegadores Chromium, audio/webm con opus es el estándar más robusto.
+  const candidates = isSafariOrIOS
+    ? [
+        'audio/mp4',
+        'audio/aac',
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/wav',
+      ]
+    : [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/wav',
+      ];
+
+  for (const candidate of candidates) {
     try {
-      if (MediaRecorder.isTypeSupported(candidate)) {
+      if (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(candidate)) {
         return candidate;
       }
     } catch {
-      // ignore
+      // ignore and test next candidate
     }
   }
 
@@ -68,8 +94,6 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
   onSave,
   familyMembers = [],
 }) => {
-  if (!isOpen) return null;
-
   // Mode: 'voz' | 'video_selfie' | 'video_pov' | 'carta'
   const [activeMode, setActiveMode] = useState<'voz' | 'video_selfie' | 'video_pov' | 'carta'>('voz');
   const [title, setTitle] = useState('');
@@ -79,7 +103,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
   const [letterContent, setLetterContent] = useState('');
   const [showTooltipPOV, setShowTooltipPOV] = useState(false);
 
-  // Estados de grabación real con MediaRecorder
+  // Estados de grabación con MediaRecorder real (sin AudioContext ni procesadores)
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [hasRecordingFinished, setHasRecordingFinished] = useState(false);
@@ -90,44 +114,35 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
   const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
   const [audioMimeType, setAudioMimeType] = useState<string>('');
 
-  // Nivel de volumen en vivo para la onda sonora
-  const [audioLevel, setAudioLevel] = useState<number>(0);
+  // Diagnóstico técnico de audio para aislar y verificar la captura
+  const [diagnostics, setDiagnostics] = useState<AudioDiagnostics | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
-  // Estados de guardado / Supabase upload
+  // Estados de guardado y persistencia en Supabase
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
 
-  // Referencias para MediaStream, MediaRecorder y AudioContext
+  // Referencias para MediaStream, MediaRecorder y timers
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const timerIntervalRef = useRef<any>(null);
   const startTimeRef = useRef<number>(0);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animFrameRef = useRef<number | null>(null);
 
-  // Detener todos los tracks y limpiar memoria
+  // Detener todos los tracks y limpiar memoria sin fallbacks
   const stopAndCleanupMedia = () => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
     }
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
-    }
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      try {
-        audioContextRef.current.close();
-      } catch {}
-      audioContextRef.current = null;
-    }
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
         mediaRecorderRef.current.stop();
-      } catch {}
+      } catch (e) {
+        console.warn('[E-Ternal Audio] Excepción deteniendo MediaRecorder:', e);
+      }
     }
     mediaRecorderRef.current = null;
 
@@ -135,13 +150,15 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       mediaStreamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
-        } catch {}
+        } catch (e) {
+          console.warn('[E-Ternal Audio] Excepción deteniendo track:', e);
+        }
       });
       mediaStreamRef.current = null;
     }
   };
 
-  // Limpieza al desmontar o cerrar
+  // Limpieza al desmontar o cuando cambia la URL del blob
   useEffect(() => {
     return () => {
       stopAndCleanupMedia();
@@ -161,12 +178,13 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
     onClose();
   };
 
-  // Iniciar Grabación Real con el Micrófono del iPhone / Navegador
+  // 1. INICIAR GRABACIÓN REAL CON EL MICRÓFONO (PIPELINE OBLIGATORIO)
+  // Sin AudioContext, AnalyserNode, filtros ni visualizadores de ondas que interfieran con el hardware
   const handleStartRealRecording = async () => {
     setRecordingError(null);
     setSubmitError(null);
 
-    // 1. Validar soporte de getUserMedia
+    // 1. Comprobar navigator.mediaDevices.getUserMedia
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setRecordingError(
         'El acceso al micrófono requiere una conexión segura (HTTPS) o no es compatible con este navegador.'
@@ -175,7 +193,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
     }
 
     try {
-      // 2. Solicitar permiso exclusivamente al hacer clic
+      // 2. Solicitar permiso exclusivamente con restricciones limpias
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -184,46 +202,46 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
         },
       });
 
-      mediaStreamRef.current = stream;
-
-      // 3. Configurar analizador de audio para onda real
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const audioCtx = new AudioCtx();
-          audioContextRef.current = audioCtx;
-          const source = audioCtx.createMediaStreamSource(stream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
-          source.connect(analyser);
-          analyserRef.current = analyser;
-
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          const checkLevel = () => {
-            if (analyserRef.current) {
-              analyserRef.current.getByteFrequencyData(dataArray);
-              let sum = 0;
-              for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-              }
-              const avg = sum / dataArray.length;
-              setAudioLevel(Math.min(100, Math.round((avg / 128) * 100)));
-            }
-            animFrameRef.current = requestAnimationFrame(checkLevel);
-          };
-          checkLevel();
-        }
-      } catch (audioCtxErr) {
-        console.warn('AudioContext no inicializado para visualizador:', audioCtxErr);
+      // 3. Verificar explícitamente que se recibió un MediaStream
+      if (!stream) {
+        throw new Error('No se recibió MediaStream del dispositivo de audio.');
       }
 
-      // 4. Crear MediaRecorder con el MIME type soportado por Safari iOS
-      const targetMime = getBestAudioMimeType();
-      let recorder: MediaRecorder;
+      // 4. Verificar explícitamente que existe al menos un audio track
+      const audioTracks = stream.getAudioTracks();
+      if (!audioTracks || audioTracks.length === 0) {
+        throw new Error('No se detectó ninguna pista de audio en el micrófono.');
+      }
 
+      const activeTrack = audioTracks[0];
+      activeTrack.enabled = true;
+
+      // 5. Detectar MIME compatible con el navegador
+      const targetMime = getSupportedAudioMimeType();
+
+      // Registro diagnóstico inicial
+      const initialDiag: AudioDiagnostics = {
+        tracksCount: audioTracks.length,
+        trackEnabled: activeTrack.enabled,
+        trackReadyState: activeTrack.readyState,
+        trackMuted: activeTrack.muted,
+        mimeTypeUsed: targetMime || 'Nativo del navegador',
+        blobSize: 0,
+        blobType: '',
+      };
+      setDiagnostics(initialDiag);
+      console.info('[E-Ternal Audio Diagnostics - Inicio]', initialDiag);
+
+      mediaStreamRef.current = stream;
+
+      // 6. Crear MediaRecorder sin intermediarios de audio
+      let recorder: MediaRecorder;
       try {
-        recorder = targetMime ? new MediaRecorder(stream, { mimeType: targetMime }) : new MediaRecorder(stream);
-      } catch {
+        recorder = targetMime 
+          ? new MediaRecorder(stream, { mimeType: targetMime }) 
+          : new MediaRecorder(stream);
+      } catch (recErr) {
+        console.warn('[E-Ternal Audio] Creación con mimeType falló, reintentando con MediaRecorder por defecto:', recErr);
         recorder = new MediaRecorder(stream);
       }
 
@@ -237,39 +255,54 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       };
 
       recorder.onstop = () => {
-        const actualMime = recorder.mimeType || targetMime || 'audio/mp4';
+        const actualMime = recorder.mimeType || targetMime || 'audio/webm';
         const finalBlob = new Blob(audioChunksRef.current, { type: actualMime });
+
+        // Comprobar que blob.size > 0
+        if (finalBlob.size === 0) {
+          setRecordingError('La grabación no contiene datos (0 bytes). Verifica los permisos del micrófono.');
+          return;
+        }
+
         setAudioBlob(finalBlob);
         setAudioMimeType(actualMime);
 
-        const newUrl = URL.createObjectURL(finalBlob);
-        setAudioBlobUrl(newUrl);
+        // Crear Object URL local para <audio controls>
+        const localUrl = URL.createObjectURL(finalBlob);
+        setAudioBlobUrl(localUrl);
 
-        // Liberar tracks del micrófono inmediatamente al terminar
+        // Actualizar diagnóstico final
+        const finalDiag: AudioDiagnostics = {
+          tracksCount: audioTracks.length,
+          trackEnabled: activeTrack.enabled,
+          trackReadyState: activeTrack.readyState,
+          trackMuted: activeTrack.muted,
+          mimeTypeUsed: actualMime,
+          blobSize: finalBlob.size,
+          blobType: finalBlob.type,
+        };
+        setDiagnostics(finalDiag);
+        console.info('[E-Ternal Audio Diagnostics - Final]', finalDiag);
+
+        // Liberar todos los audio tracks del micrófono inmediatamente
         if (mediaStreamRef.current) {
-          mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+          mediaStreamRef.current.getTracks().forEach((track) => {
+            try {
+              track.stop();
+            } catch {}
+          });
           mediaStreamRef.current = null;
-        }
-        if (animFrameRef.current) {
-          cancelAnimationFrame(animFrameRef.current);
-          animFrameRef.current = null;
-        }
-        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-          try {
-            audioContextRef.current.close();
-          } catch {}
-          audioContextRef.current = null;
         }
       };
 
-      // 5. Iniciar la grabación
-      recorder.start(250); // Emitir chunks cada 250ms
+      // 7. Iniciar grabación real con recolección de chunks periódicos
+      recorder.start(250);
       startTimeRef.current = Date.now();
       setIsRecording(true);
       setHasRecordingFinished(false);
       setRecordingSeconds(0);
 
-      // 6. Contador de tiempo real con límite de 60 segundos
+      // Contador de tiempo real (límite de 60 segundos)
       timerIntervalRef.current = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
         setRecordingSeconds(elapsed);
@@ -280,17 +313,17 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       }, 250);
 
     } catch (err: any) {
-      console.error('Error accediendo al micrófono:', err);
+      console.error('[E-Ternal Audio] Error accediendo al micrófono:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setRecordingError(
-          'El acceso al micrófono fue denegado. Revisa los permisos de Safari para E-Ternal en Ajustes > Safari > Micrófono.'
+          'Se necesita permiso para usar el micrófono. El acceso fue denegado. Revisa los permisos de Safari para E-Ternal en Ajustes > Safari > Micrófono.'
         );
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setRecordingError('No se encontró ningún micrófono conectado en este dispositivo.');
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
         setRecordingError('El micrófono está siendo utilizado por otra aplicación o llamada.');
       } else if (err.name === 'SecurityError') {
-        setRecordingError('Acceso al micrófono restringido por políticas de seguridad del navegador.');
+        setRecordingError('Acceso al micrófono restringido por políticas de seguridad del navegador o falta de HTTPS.');
       } else {
         setRecordingError(`Error al inicializar micrófono: ${err.message || 'Error desconocido'}`);
       }
@@ -298,7 +331,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
     }
   };
 
-  // Detener la Grabación Real
+  // 2. DETENER GRABACIÓN REAL
   const handleStopRealRecording = () => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
@@ -309,16 +342,15 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       try {
         mediaRecorderRef.current.stop();
       } catch (e) {
-        console.warn('Error deteniendo MediaRecorder:', e);
+        console.warn('[E-Ternal Audio] Error deteniendo MediaRecorder:', e);
       }
     }
 
     setIsRecording(false);
     setHasRecordingFinished(true);
-    setAudioLevel(0);
   };
 
-  // Volver a Grabar
+  // 3. VOLVER A GRABAR (Descarta audio local y reinicia estado)
   const handleResetRecording = () => {
     stopAndCleanupMedia();
     if (audioBlobUrl) {
@@ -332,6 +364,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
     setIsRecording(false);
     setRecordingError(null);
     setSubmitError(null);
+    setDiagnostics(null);
   };
 
   const handleRecipientChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -357,17 +390,19 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
   const progressPercent = Math.min((recordingSeconds / 60) * 100, 100);
   const recordedDurationFormatted = formatSeconds(recordingSeconds || 0);
 
-  // Guardar y Cifrar Recuerdo
+  // 4. GUARDAR Y SUBIR A SUPABASE (Sólo tras confirmar reproducción local)
   const handleSaveMemory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || isSubmitting) return;
 
     setSubmitError(null);
 
-    // Validación estricta para modo voz
-    if (activeMode === 'voz' && !audioBlob) {
-      setSubmitError('Por favor graba tu nota de voz antes de sellar el recuerdo.');
-      return;
+    // Validación estricta para modo voz: exige blob con contenido real
+    if (activeMode === 'voz') {
+      if (!audioBlob || audioBlob.size === 0) {
+        setSubmitError('Por favor graba tu nota de voz y verifica que se escuche antes de guardar.');
+        return;
+      }
     }
 
     let finalType: 'voz' | 'video' | 'carta' = 'voz';
@@ -380,7 +415,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
 
     const contentToSave = activeMode === 'carta' && letterContent.trim()
       ? letterContent.trim()
-      : `Testimonio custodiado en modo ${activeMode.replace('_', ' ').toUpperCase()} para ${recipient}. Sinceridad, principios morales y recuerdo vivo preservado en la Bóveda E-ternal.`;
+      : `Testimonio custodiado en modo ${activeMode.replace('_', ' ').toUpperCase()} para ${recipient}. Resguardo de voz y memoria viva en E-ternal.`;
 
     const newMem: Memory = {
       id: `mem-${Date.now()}`,
@@ -406,7 +441,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
     try {
       setIsSubmitting(true);
 
-      // Delegar en el handler con persistencia en Supabase (Storage + media_assets)
+      // Delegar en el handler: auth.uid() -> people -> memories -> storage -> media_assets
       await onSave(
         newMem, 
         audioBlob || undefined, 
@@ -417,13 +452,17 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       setSubmitSuccess(true);
       setTimeout(() => {
         handleCloseModal();
-      }, 1500);
+      }, 1400);
     } catch (err: any) {
-      console.error('Error al guardar el recuerdo:', err);
-      setSubmitError(err.message || 'Error al persistir el recuerdo en Supabase.');
+      console.error('[E-Ternal Audio] Error durante el guardado en Supabase:', err);
+      // No silenciar el error de Supabase
+      setSubmitError(err.message || 'Error al persistir el recuerdo y el audio en Supabase.');
       setIsSubmitting(false);
     }
   };
+
+  // Validación de montaje condicional segura: DESPUÉS de todos los hooks
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[#2C241E]/60 backdrop-blur-sm animate-fadeIn">
@@ -439,7 +478,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
             </div>
             <div>
               <h2 className="font-editorial text-xl font-bold text-[#2C241E]">Nuevo Recuerdo</h2>
-              <p className="text-xs text-[#6B5E55] font-sans">Captura y resguardo en Bóveda Eterna</p>
+              <p className="text-xs text-[#6B5E55] font-sans">Captura auténtica con resguardo privado</p>
             </div>
           </div>
 
@@ -447,6 +486,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
             onClick={handleCloseModal}
             disabled={isSubmitting}
             className="p-1.5 rounded-xl text-[#8C7A6B] hover:text-[#2C241E] hover:bg-[#EFE8DE] transition-colors disabled:opacity-50"
+            title="Cerrar modal"
           >
             <X className="w-5 h-5" />
           </button>
@@ -535,7 +575,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                     {showTooltipPOV && (
                       <div className="absolute z-30 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 rounded-xl bg-[#2C241E] text-white text-xs leading-relaxed shadow-soft border border-[#D4AF37]/60 text-left pointer-events-none">
                         <p className="font-sans text-slate-100">
-                          Sostén el celular horizontal a la altura de tus ojos, buena luz. Formato compatible con gafas mañana.
+                          Sostén el celular horizontal a la altura de tus ojos, con luz frontal natural.
                         </p>
                         <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-[#2C241E]" />
                       </div>
@@ -613,7 +653,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                 type="text"
                 required
                 disabled={isSubmitting}
-                placeholder="Ej. Para cuando dudes de tu vocación / Recuerdos del verano en la finca..."
+                placeholder="Ej. Palabras sobre la perseverancia para cuando dudes del camino..."
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 className="w-full px-4 py-2.5 rounded-xl border border-[#E8DEC8] focus:border-[#D4AF37] focus:ring-1 focus:ring-[#D4AF37] outline-none text-sm text-[#2C241E] font-editorial bg-white placeholder:font-sans placeholder:text-[#9E9187]"
@@ -648,7 +688,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                   disabled={isSubmitting}
                   value={releaseCondition}
                   onChange={(e) => setReleaseCondition(e.target.value)}
-                  placeholder="Ej. En su 25º aniversario de vida / Boda"
+                  placeholder="Ej. En su 18º cumpleaños / Matrimonio"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E8DEC8] focus:border-[#D4AF37] outline-none text-xs sm:text-sm text-[#2C241E] bg-white"
                 />
               </div>
@@ -725,33 +765,65 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-4 pt-1">
-                  
-                  {/* Waveform animado sensible al audio real */}
-                  <div className="flex items-center space-x-1 h-9 w-full bg-white p-2 rounded-xl border border-[#E8DEC8]">
-                    {[16, 32, 48, 80, 95, 60, 40, 75, 90, 85, 50, 30, 65, 80, 100, 70, 45, 35, 60, 85, 75, 50, 30, 20].map((h, i) => {
-                      const levelMultiplier = isRecording ? Math.max(0.2, audioLevel / 100) : 0.2;
-                      const height = isRecording ? Math.min(100, h * levelMultiplier * 1.5) : hasRecordingFinished ? h * 0.7 : 15;
-                      return (
-                        <div
-                          key={i}
-                          className={`flex-1 rounded-full transition-all duration-150 ${
-                            isRecording 
-                              ? 'bg-[#D4AF37]' 
-                              : hasRecordingFinished 
-                                ? 'bg-[#C59B27]' 
-                                : 'bg-[#D8C9B4]'
-                          }`}
-                          style={{ height: `${Math.max(12, height)}%` }}
-                        />
-                      );
-                    })}
+
+                  {/* Indicador visual de estado de grabación limpio (Sin AudioContext ni analizador) */}
+                  <div className="p-4 rounded-xl bg-white border border-[#E8DEC8] flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <div className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
+                        isRecording 
+                          ? 'bg-rose-100 text-rose-600 animate-pulse' 
+                          : hasRecordingFinished 
+                            ? 'bg-emerald-100 text-emerald-700' 
+                            : 'bg-[#FAF7F2] text-[#A88720]'
+                      }`}>
+                        {isRecording ? (
+                          <Activity className="w-5 h-5 animate-pulse" />
+                        ) : hasRecordingFinished ? (
+                          <Check className="w-5 h-5" />
+                        ) : (
+                          <Mic className="w-5 h-5" />
+                        )}
+                      </div>
+
+                      <div>
+                        <div className="text-xs font-semibold text-[#2C241E]">
+                          {isRecording ? (
+                            <span className="text-rose-600">Captura de audio activa en el micrófono</span>
+                          ) : hasRecordingFinished ? (
+                            <span className="text-emerald-700">Audio capturado y disponible para prueba</span>
+                          ) : (
+                            <span>Micrófono listo para grabar</span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-[#8C7A6B]">
+                          {isRecording 
+                            ? 'Habla con naturalidad cerca de tu iPhone o equipo.' 
+                            : hasRecordingFinished 
+                              ? 'Escucha tu voz abajo antes de confirmar el guardado.' 
+                              : 'Presiona "Iniciar Grabación" para comenzar.'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="font-mono text-xs font-semibold text-[#2C241E] bg-[#FAF7F2] px-2.5 py-1 rounded-lg border border-[#E8DEC8]">
+                      {isRecording ? formatSeconds(recordingSeconds) : hasRecordingFinished ? recordedDurationFormatted : '00:00'}
+                    </div>
                   </div>
 
                   {/* Controles de Grabación */}
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
-                    <div className="text-xs text-[#6B5E55] flex items-center space-x-1.5">
+                    <div className="text-xs text-[#6B5E55] flex items-center space-x-2">
                       <Volume2 className="w-3.5 h-3.5 text-[#D4AF37]" />
-                      <span>Formato detectado: <strong className="text-[#2C241E]">{audioMimeType || getBestAudioMimeType() || 'Nativo'}</strong></span>
+                      <span>Formato: <strong className="text-[#2C241E]">{audioMimeType || getSupportedAudioMimeType() || 'Nativo de Safari'}</strong></span>
+                      {diagnostics && (
+                        <button
+                          type="button"
+                          onClick={() => setShowDiagnostics(!showDiagnostics)}
+                          className="text-[10px] text-[#A88720] underline ml-1 hover:text-[#947113]"
+                        >
+                          {showDiagnostics ? 'Ocultar diagnóstico' : 'Ver diagnóstico'}
+                        </button>
+                      )}
                     </div>
 
                     <div className="flex items-center space-x-2">
@@ -771,7 +843,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                         <button
                           type="button"
                           onClick={handleStopRealRecording}
-                          className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-rose-600 text-white font-semibold text-xs hover:bg-rose-500 transition-colors animate-pulse shadow-soft"
+                          className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-rose-600 text-white font-semibold text-xs hover:bg-rose-500 transition-colors shadow-soft"
                         >
                           <Square className="w-3.5 h-3.5 fill-current" />
                           <span>Detener Grabación</span>
@@ -792,24 +864,41 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Diagnóstico técnico visible para verificación de tracks y codec */}
+                  {showDiagnostics && diagnostics && (
+                    <div className="p-3 bg-white rounded-xl border border-[#E8DEC8] text-[11px] text-[#4A3E34] space-y-1 font-mono">
+                      <div>Pistas de audio: {diagnostics.tracksCount} (activa: {String(diagnostics.trackEnabled)}, mute: {String(diagnostics.trackMuted)})</div>
+                      <div>Estado de pista: {diagnostics.trackReadyState}</div>
+                      <div>MIME: {diagnostics.mimeTypeUsed}</div>
+                      <div>Tamaño Blob: {diagnostics.blobSize} bytes ({(diagnostics.blobSize / 1024).toFixed(1)} KB)</div>
+                      <div>Tipo Blob: {diagnostics.blobType}</div>
+                    </div>
+                  )}
+
                   {/* REPRODUCTOR HTML5 CON BLOB LOCAL PARA ESCUCHAR ANTES DE GUARDAR */}
                   {hasRecordingFinished && audioBlobUrl && (
-                    <div className="p-3.5 rounded-xl bg-white border border-[#D4AF37]/50 shadow-xs space-y-2 animate-fadeIn">
+                    <div className="p-4 rounded-xl bg-white border border-[#D4AF37]/70 shadow-xs space-y-2.5 animate-fadeIn">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-editorial font-bold text-[#2C241E]">
-                          Escucha tu grabación antes de sellar:
+                        <span className="font-editorial font-bold text-[#2C241E] flex items-center space-x-1.5">
+                          <Volume2 className="w-4 h-4 text-[#D4AF37]" />
+                          <span>Reproducción local antes de guardar:</span>
                         </span>
                         <span className="font-mono text-[11px] text-[#A88720]">
                           {recordedDurationFormatted} · {(audioBlob?.size ? (audioBlob.size / 1024).toFixed(1) + ' KB' : '')}
                         </span>
                       </div>
                       
+                      {/* Control nativo HTML5 que garantiza reproducción en iPhone Safari y Chrome */}
                       <audio 
                         controls 
                         src={audioBlobUrl} 
-                        className="w-full h-10 outline-none" 
+                        className="w-full h-11 outline-none" 
                         preload="auto"
                       />
+
+                      <div className="text-[11px] text-[#6B5E55] bg-[#FAF7F2] p-2.5 rounded-lg border border-[#E8DEC8]">
+                        🔊 <strong>Confirmación:</strong> Presiona Play arriba para escuchar tu voz. Si se escucha claro, haz clic en "Guardar y Cifrar en Bóveda". Si escuchas ruido, pulsa "Volver a grabar".
+                      </div>
                     </div>
                   )}
 
@@ -824,7 +913,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
             <div className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-900 text-xs flex items-start space-x-2.5 animate-fadeIn">
               <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
               <div className="space-y-1">
-                <p className="font-bold">Error de persistencia:</p>
+                <p className="font-bold">Error de persistencia en Supabase:</p>
                 <p className="leading-relaxed font-sans">{submitError}</p>
               </div>
             </div>
@@ -850,7 +939,7 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
 
             <button
               type="submit"
-              disabled={isRecording || isSubmitting}
+              disabled={isRecording || isSubmitting || (activeMode === 'voz' && !audioBlob)}
               className="inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#D4AF37] text-white hover:bg-[#C59B27] border border-[#D4AF37] shadow-gold-subtle transition-all text-xs font-semibold disabled:opacity-50"
             >
               {isSubmitting ? (

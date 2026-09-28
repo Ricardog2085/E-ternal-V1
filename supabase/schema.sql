@@ -287,7 +287,7 @@ VALUES (
     'eternal-media',
     FALSE,
     104857600, -- 100MB por archivo
-    ARRAY['image/jpeg', 'image/png', 'image/webp', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', 'video/mp4', 'video/webm', 'video/quicktime']
+    ARRAY['image/jpeg', 'image/png', 'image/webp', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/x-m4a', 'video/mp4', 'video/webm', 'video/quicktime']
 )
 ON CONFLICT (id) DO NOTHING;
 
