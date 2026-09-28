@@ -17,7 +17,8 @@ import {
   RotateCcw,
   Loader2,
   Volume2,
-  Activity
+  Activity,
+  Upload
 } from 'lucide-react';
 import { Memory, FamilyMember } from '../types/eternal';
 
@@ -129,6 +130,50 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
   const audioChunksRef = useRef<BlobPart[]>([]);
   const timerIntervalRef = useRef<any>(null);
   const startTimeRef = useRef<number>(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Manejo de carga de archivo de audio local como alternativa
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('audio/') && !file.name.match(/\.(m4a|mp3|wav|webm|ogg|aac)$/i)) {
+      setRecordingError('Por favor selecciona un archivo de audio válido (.m4a, .mp3, .wav, .webm, .aac).');
+      return;
+    }
+
+    stopAndCleanupMedia();
+    if (audioBlobUrl) {
+      URL.revokeObjectURL(audioBlobUrl);
+    }
+
+    const mime = file.type || (file.name.endsWith('.m4a') ? 'audio/mp4' : 'audio/webm');
+    setAudioBlob(file);
+    setAudioMimeType(mime);
+    const localUrl = URL.createObjectURL(file);
+    setAudioBlobUrl(localUrl);
+    setHasRecordingFinished(true);
+    setIsRecording(false);
+    setRecordingError(null);
+
+    const tempAudio = new Audio(localUrl);
+    tempAudio.onloadedmetadata = () => {
+      if (tempAudio.duration && !isNaN(tempAudio.duration)) {
+        setRecordingSeconds(Math.round(tempAudio.duration));
+      }
+    };
+
+    const finalDiag: AudioDiagnostics = {
+      tracksCount: 1,
+      trackEnabled: true,
+      trackReadyState: 'archivo_cargado',
+      trackMuted: false,
+      mimeTypeUsed: mime,
+      blobSize: file.size,
+      blobType: file.type || mime,
+    };
+    setDiagnostics(finalDiag);
+  };
 
   // Detener todos los tracks y limpiar memoria sin fallbacks
   const stopAndCleanupMedia = () => {
@@ -313,19 +358,26 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
       }, 250);
 
     } catch (err: any) {
-      console.error('[E-Ternal Audio] Error accediendo al micrófono:', err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      console.warn('[E-Ternal Audio] Acceso al micrófono no concedido o denegado por el navegador:', err?.message || err);
+      const errMsg = (err?.message || '').toLowerCase();
+      if (
+        err?.name === 'NotAllowedError' || 
+        err?.name === 'PermissionDeniedError' ||
+        errMsg.includes('not allowed') ||
+        errMsg.includes('denied permission') ||
+        errMsg.includes('permission')
+      ) {
         setRecordingError(
-          'Se necesita permiso para usar el micrófono. El acceso fue denegado. Revisa los permisos de Safari para E-Ternal en Ajustes > Safari > Micrófono.'
+          'El acceso al micrófono no fue concedido o fue bloqueado por las políticas del navegador. En iPhone/Safari, asegúrate de habilitar el micrófono en Ajustes > Safari > Micrófono o haz clic en "Subir archivo de audio" si prefieres seleccionar una nota de voz pregrabada.'
         );
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+      } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
         setRecordingError('No se encontró ningún micrófono conectado en este dispositivo.');
-      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+      } else if (err?.name === 'NotReadableError' || err?.name === 'TrackStartError') {
         setRecordingError('El micrófono está siendo utilizado por otra aplicación o llamada.');
-      } else if (err.name === 'SecurityError') {
+      } else if (err?.name === 'SecurityError') {
         setRecordingError('Acceso al micrófono restringido por políticas de seguridad del navegador o falta de HTTPS.');
       } else {
-        setRecordingError(`Error al inicializar micrófono: ${err.message || 'Error desconocido'}`);
+        setRecordingError(`Error al inicializar micrófono: ${err?.message || 'Error desconocido'}`);
       }
       setIsRecording(false);
     }
@@ -712,11 +764,31 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
 
               {/* Mensaje de error de permisos o hardware de micrófono */}
               {recordingError && (
-                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start space-x-2 animate-fadeIn">
-                  <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <p className="font-semibold">Permiso o dispositivo requerido:</p>
-                    <p className="leading-relaxed">{recordingError}</p>
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex flex-col space-y-2.5 animate-fadeIn">
+                  <div className="flex items-start space-x-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-semibold">Acceso al micrófono no concedido:</p>
+                      <p className="leading-relaxed">{recordingError}</p>
+                    </div>
+                  </div>
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-[#D4AF37] hover:bg-[#C59B27] text-white font-semibold text-xs transition-colors shadow-xs"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Subir archivo de audio (.m4a, .mp3, .wav)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartRealRecording}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 font-semibold text-xs transition-colors"
+                    >
+                      <Mic className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Reintentar permiso</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -827,16 +899,37 @@ export const NewMemoryModal: React.FC<NewMemoryModalProps> = ({
                     </div>
 
                     <div className="flex items-center space-x-2">
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        accept="audio/*,.m4a,.mp3,.wav,.webm,.aac,.ogg"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
+
                       {!isRecording && !hasRecordingFinished && (
-                        <button
-                          type="button"
-                          onClick={handleStartRealRecording}
-                          disabled={isSubmitting}
-                          className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-[#D4AF37] text-white font-semibold text-xs hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-gold-subtle"
-                        >
-                          <Mic className="w-3.5 h-3.5" />
-                          <span>Iniciar Grabación</span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleStartRealRecording}
+                            disabled={isSubmitting}
+                            className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-[#D4AF37] text-white font-semibold text-xs hover:bg-[#C59B27] transition-transform hover:scale-105 shadow-gold-subtle"
+                          >
+                            <Mic className="w-3.5 h-3.5" />
+                            <span>Iniciar Grabación</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={isSubmitting}
+                            className="inline-flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-white text-[#2C241E] border border-[#E8DEC8] hover:border-[#D4AF37] font-semibold text-xs transition-colors shadow-xs"
+                            title="Subir archivo de audio existente"
+                          >
+                            <Upload className="w-3.5 h-3.5 text-[#D4AF37]" />
+                            <span>Subir audio</span>
+                          </button>
+                        </>
                       )}
 
                       {isRecording && (
